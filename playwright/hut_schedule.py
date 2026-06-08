@@ -36,61 +36,47 @@ Cookie 持久化：
 """
 
 # ============================================================================
-# 0. 自动检测并安装依赖
+# 0. 自动检测并安装基础运行依赖
 # ============================================================================
 
-def check_and_install_dependencies():
-    """检测缺失的依赖包和 Playwright 浏览器内核，并自动下载安装。"""
+def check_and_install_base_dependencies():
+    """在启动时仅检测和自动安装 Requests/BeautifulSoup/PyCryptodome 等基础运行依赖。"""
     import subprocess
     import sys
+    import importlib.util
     
-    # 外部依赖包映射：import 名 -> pip 安装包名
     required_packages = {
         "requests": "requests",
         "bs4": "beautifulsoup4",
-        "playwright": "playwright",
         "Crypto": "pycryptodome"
     }
     
     missing_packages = []
     for import_name, pkg_name in required_packages.items():
         try:
-            __import__(import_name)
+            spec = importlib.util.find_spec(import_name)
+            if spec is None:
+                missing_packages.append(pkg_name)
+            else:
+                # 针对 Crypto 等可能存在安装损坏或命名冲突的包，进行二次导入校验
+                __import__(import_name)
         except ImportError:
             missing_packages.append(pkg_name)
+        except Exception:
+            pass
             
     if missing_packages:
-        print(f"[*] 检测到缺少依赖包: {missing_packages}，正在自动下载安装...")
+        print(f"[*] 检测到环境缺少基础运行依赖包: {missing_packages}，正在自动下载安装...")
         try:
             # 确保使用当前 Python 解释器运行 pip
             subprocess.check_call([sys.executable, "-m", "pip", "install", *missing_packages])
-            print("[+] 依赖包安装成功！")
+            print("[+] 基础运行依赖包安装成功！")
         except Exception as e:
-            print(f"[!] 依赖包自动安装失败: {e}，请手动运行 pip install {' '.join(missing_packages)}")
+            print(f"[!] 基础运行依赖包自动安装失败: {e}，请手动运行 pip install {' '.join(missing_packages)}")
             sys.exit(1)
-            
-    # 检查 Playwright 浏览器内核 (Chromium) 是否存在
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser.close()
-    except Exception as e:
-        err_msg = str(e)
-        if "Executable doesn't exist" in err_msg or "playwright install" in err_msg or "not installed" in err_msg or "look like Playwright was" in err_msg or "not found" in err_msg.lower():
-            print("[*] 检测到未安装 Playwright 浏览器内核，正在自动下载 (Chromium) ...")
-            try:
-                subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
-                print("[+] Playwright 浏览器内核安装成功！")
-            except Exception as pe:
-                print(f"[!] 自动安装 Playwright 浏览器内核失败: {pe}，请手动运行 python -m playwright install chromium")
-                sys.exit(1)
-        else:
-            # 其它非内核缺失引发的异常，直接打印
-            print(f"[*] 检查 Playwright 内核时遇到异常 (可能会在后续执行中报错): {e}")
 
-# 在导入第三方模块之前执行检测与安装
-check_and_install_dependencies()
+# 启动时仅对基础运行依赖进行轻量级检测，不检测 Playwright 与浏览器内核
+check_and_install_base_dependencies()
 
 import re
 import sys
@@ -200,94 +186,138 @@ def validate_cookies(cookies: dict) -> bool:
 
 def login_and_get_cookies(username, password, headless=False, wait_login=60):
     """驱动 Chromium 完成 CAS 登录，返回 Cookie 字典。"""
+    
+    # 1. 仅在需要使用 Playwright 兜底登录时，才动态检测并安装 playwright python 依赖包
+    import sys
+    import importlib.util
+    import subprocess
+    try:
+        spec = importlib.util.find_spec("playwright")
+        if spec is None:
+            raise ImportError
+    except (ImportError, Exception):
+        print("[*] 检测到未安装 playwright 依赖包，正在自动下载...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+            print("[+] playwright 依赖包安装成功！")
+        except Exception as e:
+            print(f"[!] 自动安装 playwright 依赖失败: {e}，请手动运行 pip install playwright")
+            sys.exit(1)
+            
     from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled"]
-        )
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
-        page = context.new_page()
-
-        try:
-            print("[*] 打开统一身份认证登录页 ...")
-            page.goto(CAS_LOGIN)
+    # 2. 定义登录的具体执行函数
+    def do_login():
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+            context = browser.new_context(viewport={"width": 1280, "height": 800})
+            page = context.new_page()
 
             try:
-                page.wait_for_selector("input[type='password']:not([type='hidden'])", timeout=20000)
-                
-                # 找可见账号框
-                user_input = None
-                for sel in [
-                    "input[type='text']:not([type='hidden'])",
-                    "input[type='tel']",
-                    "input[autocomplete='username']",
-                    "input[placeholder*='账号']",
-                    "input[placeholder*='学号']",
-                ]:
-                    loc = page.locator(sel)
-                    count = loc.count()
-                    for i in range(count):
-                        el = loc.nth(i)
-                        if el.is_visible():
-                            user_input = el
+                print("[*] 打开统一身份认证登录页 ...")
+                page.goto(CAS_LOGIN)
+
+                try:
+                    page.wait_for_selector("input[type='password']:not([type='hidden'])", timeout=20000)
+                    
+                    user_input = None
+                    for sel in [
+                        "input[type='text']:not([type='hidden'])",
+                        "input[type='tel']",
+                        "input[autocomplete='username']",
+                        "input[placeholder*='账号']",
+                        "input[placeholder*='学号']",
+                    ]:
+                        loc = page.locator(sel)
+                        count = loc.count()
+                        for i in range(count):
+                            el = loc.nth(i)
+                            if el.is_visible():
+                                user_input = el
+                                break
+                        if user_input:
                             break
-                    if user_input:
+                    
+                    pwd_input = None
+                    pwd_loc = page.locator("input[type='password']")
+                    for i in range(pwd_loc.count()):
+                        el = pwd_loc.nth(i)
+                        if el.is_visible():
+                            pwd_input = el
+                            break
+
+                    if user_input and pwd_input:
+                        user_input.fill(username)
+                        page.wait_for_timeout(300)
+                        pwd_input.fill(password)
+                        page.wait_for_timeout(500)
+                        pwd_input.press("Enter")
+                        print("[*] 已填入账号密码并按回车提交")
+                except Exception as e:
+                    print("[!] 自动填写未完成，请在弹出的浏览器中手动登录：", e)
+
+                print("[*] 等待登录成功（最多 %d 秒）..." % wait_login)
+                deadline = time.time() + wait_login
+                logged_in = False
+                while time.time() < deadline:
+                    url = page.url
+                    cookies_list = context.cookies()
+                    names = {c["name"] for c in cookies_list}
+                    src = page.content()
+                    if "CASTGC" in names or "TGC" in names or "/cas/login" not in url or "登录成功" in src:
+                        logged_in = True
                         break
+                    page.wait_for_timeout(1500)
+                if not logged_in:
+                    raise TimeoutError("登录超时（%d秒），请检查账号密码或手动完成验证。" % wait_login)
+
+                # 单点登录进教务系统
+                print("[*] 通过 sso.jsp 单点登录进入教务系统 ...")
+                page.goto(SSO_ENTRY)
+                try:
+                    page.wait_for_url(re.compile(r"jsxsd|jwxt"), timeout=20000)
+                except Exception:
+                    if "jsxsd" not in page.url and "jwxt" not in page.url:
+                        raise
                 
-                pwd_input = None
-                pwd_loc = page.locator("input[type='password']")
-                for i in range(pwd_loc.count()):
-                    el = pwd_loc.nth(i)
-                    if el.is_visible():
-                        pwd_input = el
-                        break
-
-                if user_input and pwd_input:
-                    user_input.fill(username)
-                    page.wait_for_timeout(300)
-                    pwd_input.fill(password)
-                    page.wait_for_timeout(500)
-                    pwd_input.press("Enter")
-                    print("[*] 已填入账号密码并按回车提交")
-            except Exception as e:
-                print("[!] 自动填写未完成，请在弹出的浏览器中手动登录：", e)
-
-            print("[*] 等待登录成功（最多 %d 秒）..." % wait_login)
-            deadline = time.time() + wait_login
-            logged_in = False
-            while time.time() < deadline:
-                url = page.url
-                cookies_list = context.cookies()
-                names = {c["name"] for c in cookies_list}
-                src = page.content()
-                if "CASTGC" in names or "TGC" in names or "/cas/login" not in url or "登录成功" in src:
-                    logged_in = True
-                    break
+                page.goto(KB_API)
                 page.wait_for_timeout(1500)
-            if not logged_in:
-                raise TimeoutError("登录超时（%d秒），请检查账号密码或手动完成验证。" % wait_login)
 
-            # 单点登录进教务系统
-            print("[*] 通过 sso.jsp 单点登录进入教务系统 ...")
-            page.goto(SSO_ENTRY)
+                cookies_list = context.cookies()
+                cookies = {c["name"]: c["value"] for c in cookies_list}
+                print("[+] 登录成功，已获取 %d 个 Cookie。" % len(cookies))
+                save_cookies(cookies)
+                return cookies
+            finally:
+                browser.close()
+
+    # 3. 尝试执行登录逻辑，若因缺少浏览器内核报错，则自动捕获下载并重试
+    try:
+        return do_login()
+    except Exception as e:
+        err_msg = str(e)
+        # 精确匹配 Playwright 报出的“浏览器内核未安装”错误，防止其他系统级错误（如缺少系统依赖库、显箱权限等）误触发重新下载
+        is_browser_missing = (
+            "executable doesn't exist" in err_msg.lower() or 
+            "playwright install" in err_msg.lower() or 
+            "run the following command" in err_msg.lower()
+        )
+        if is_browser_missing:
+            print("[*] 检测到未安装 Playwright 浏览器内核，正在自动下载 (Chromium) ...")
             try:
-                page.wait_for_url(re.compile(r"jsxsd|jwxt"), timeout=20000)
-            except Exception:
-                if "jsxsd" not in page.url and "jwxt" not in page.url:
-                    raise
-            
-            page.goto(KB_API)
-            page.wait_for_timeout(1500)
+                subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+                print("[+] Playwright 浏览器内核安装成功！正在重新尝试登录...")
+                return do_login()
+            except Exception as pe:
+                print(f"[!] 自动安装 Playwright 浏览器内核失败: {pe}，请手动运行 python -m playwright install chromium")
+                sys.exit(1)
+        else:
+            # 其它非内核缺失引起的错误（如网络中断、密码错误等）直接抛出
+            raise
 
-            cookies_list = context.cookies()
-            cookies = {c["name"]: c["value"] for c in cookies_list}
-            print("[+] 登录成功，已获取 %d 个 Cookie。" % len(cookies))
-            save_cookies(cookies)
-            return cookies
-        finally:
-            browser.close()
 
 
 # ============================================================================
