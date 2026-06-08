@@ -124,11 +124,3 @@ python playwright/hut_schedule.py --user "123456" --pwd "mypwd" --relogin
 | `--headless` | `False` | 命令行直接添加即可 | 调起浏览器兜底登录时是否使用无头模式 (Headless) |
 
 ---
-
-## 6. 系统对接与数据流设计
-
-本爬虫项目作为数据同步模块，可无缝嵌入 Electron 主进程（或后端微服务）中。
-
-1. **接口契约**：前端通过 Node.js `child_process.exec` 执行本 CLI 脚本，并指定 `--out` 参数。
-2. **数据处理**：脚本抓取成功后将完整数据以约定格式存入 JSON 临时文件。
-3. **数据结构标准**：输出的 JSON 文件结构（包含课表、备注、考试、成绩等）完全符合 [对接开发指南 (crawler_integration_guide.md)](file:///C:/Users/tanner/Desktop/crawler_integration_guide.md) 中定义的 Schema。
