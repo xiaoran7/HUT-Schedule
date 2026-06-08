@@ -1,134 +1,79 @@
-# 湖南工业大学教务系统全功能爬虫 (双引擎开源版)
+# 湖南工业大学 教务系统全功能爬虫 (Playwright 版)
 
-本爬虫项目用于抓取湖南工业大学强智教务系统的**个人课表**、**考试安排**、**课程成绩**及**学期与周次信息**，并支持将数据输出为结构化的 JSON 文件。
-
-项目同时提供了 **Playwright** 和 **Selenium** 两种浏览器自动化引擎的实现，以满足不同运行环境和部署偏好的需求。本项目支持以 CLI 命令行方式被 Electron 前端或后端主进程调用。
-
-> [!NOTE]
-> 爬虫与前端系统的对接标准及数据格式规范，请参考项目外置的：[对接开发指南 (crawler_integration_guide.md)](file:///C:/Users/tanner/Desktop/crawler_integration_guide.md)。
+本爬虫用于抓取湖南工业大学强智教务系统的**个人课表**、**考试安排**、**课程成绩**及**学期与周次信息**，并输出为结构化的 JSON 数据供前端系统进行同步和展示。
 
 ---
 
-## 1. 核心设计与特性
+## 1. 抓包接口设计
 
-* **双动力引擎支持**：提供 Playwright（现代、极速、免配置）和 Selenium（传统、成熟）两个版本。
-* **极速双模登录 (Requests + Browser)**：
-  1. **Cookie 缓存复用**：登录成功后的 Cookie 会持久化存入用户目录下的 `~/.hut_session.json`。后续运行优先校验缓存，若未过期（TTL 4小时）则直接复用，**跳过所有登录步骤（耗时约 0.5s）**。
-  2. **Requests 直连登录 (P0 推荐)**：如果缓存失效，爬虫首先通过 Requests 获取教务系统的 RSA 公钥，在内存中完成密码加密并模拟登录。**无需打开浏览器，全程无感同步（耗时约 2s）**。
-  3. **浏览器自动兜底登录**：若直连登录失败（如需图形验证码或滑块），则自动唤起 Chromium/Chrome 浏览器让用户进行登录，成功后截获 Cookie 并更新缓存。
-* **智能动态分页 (Dynamic Pagination)**：自动分页拉取多页成绩与考试安排，无需硬编码 `pageSize`。
-* **学期与周次自动识别**：支持学期参数 `auto`，自动提取活跃学期，并根据主页当前周次反推学期开学日期（第一周周一）。
-
----
-
-## 2. 版本对比与目录结构
-
-本项目包含两个版本的爬虫实现：
-
-| 维度 | Playwright 版本 (推荐) | Selenium 版本 |
-| :--- | :--- | :--- |
-| **文件位置** | [`playwright/hut_schedule.py`](file:///c:/Users/tanner/Desktop/selenium/playwright/hut_schedule.py) | [`hut_schedule.py`](file:///c:/Users/tanner/Desktop/selenium/hut_schedule.py) |
-| **环境依赖** | Python 3.10+，支持一键自检与自动修复 | Python 3.10+，需系统预装 Chrome 浏览器 |
-| **浏览器驱动** | 首次运行自动检测安装 (Chromium 内核) | 通过 `webdriver-manager` 自动配置 Chrome 驱动 |
-| **启动速度** | 极快，运行开销小 | 较快 |
-| **反爬规避** | 强 (Playwright 默认防检测能力优异) | 中 (需配置 Chrome Options 绕过 CDP 检测) |
+| 功能模块 | 请求地址 (基于 `http://jwxt.hut.edu.cn/jsxsd`) | 请求方式 | 关键参数 |
+| :--- | :--- | :--- | :--- |
+| **单点登录入口** | `/sso.jsp` | GET | - |
+| **课表查询** | `/xskb/xskb_list.do` | GET | `xnxq01id` (学期), `zc` (周次), `viweType=0` |
+| **考试安排** | `/xsks/xsksap_list` | GET | `xnxqid` (学期), `pageNum`, `pageSize` |
+| **课程成绩** | `/kscj/cjcx_list` | GET | `kksj` (开课学期，空代表全部学期), `pageNum`, `pageSize` |
+| **学期周次** | `/xskb/jxzlzc_xnxq_ajax` | GET | `xnxq01id` (学期) |
+| **当前周次** | `/framework/xsMainV.htmlx` | GET | 解析网页正文中的 `"第N周"` 字样 |
 
 ---
 
-## 3. Playwright 版本详解 (`/playwright`)
+## 2. 核心设计与特性
 
-Playwright 版本位于 [`playwright/`](file:///c:/Users/tanner/Desktop/selenium/playwright/) 文件夹中，提供了**完全自动化的依赖检测和静默安装服务**。
+### 2.1 极速双模登录 (Requests + Playwright)
+为了在效率与成功率之间取得平衡，爬虫实现了两阶段登录模式：
+1. **Cookie 缓存复用**：登录成功后的 Cookie 会被保存至用户目录下的 `~/.hut_session.json`。后续运行会优先校验缓存，若未过期（TTL 4小时）则直接复用，**跳过所有登录步骤（耗时约 0.5s）**。
+2. **Requests 直连登录 (P0 推荐)**：如果缓存失效，爬虫首先通过 Requests 获取教务系统的 RSA 公钥，在内存中完成密码加密并模拟登录。**无需打开浏览器，全程无感同步（耗时约 2s）**。
+3. **Playwright 兜底登录**：若直连登录失败（如需图形验证码或滑块），则自动唤起 Chromium 浏览器让用户进行登录，成功后截获 Cookie 并更新缓存。
 
-### 3.1 环境要求
-- **Python 版本**：Python 3.10+
-- **系统环境**：Windows / macOS / Linux (无需手动配置任何浏览器环境，Playwright 会全自动下载 Chromium 内核)
+### 2.2 智能动态分页 (Dynamic Pagination)
+由于成绩与考试安排可能存在多页数据，爬虫会**先请求第 1 页，解析响应 JSON 中的 `count`（总条数）与当前页数据长度，动态计算总页数，并自动循环拉取后续页面**进行合并。
 
-### 3.2 依赖介绍
-主要依赖列在 [`playwright/requirements.txt`](file:///c:/Users/tanner/Desktop/selenium/playwright/requirements.txt) 中：
-- `requests>=2.31` (网络请求与直连登录)
-- `beautifulsoup4>=4.12` & `lxml>=5.0` (HTML 解析)
-- `playwright>=1.40.0` (Chromium 浏览器登录兜底)
-- `pycryptodome>=3.19.0` (CAS 密码 RSA 加密)
-
-### 3.3 零配置快速开始 (推荐)
-Playwright 版本已内置**自检机制**。你不需要手动运行任何 `pip` 或 `playwright install` 命令。直接运行脚本，脚本会自动检测缺失项并静默安装：
-```bash
-# 激活 Conda 或 Python 虚拟环境，直接运行
-python playwright/hut_schedule.py --user "您的学号" --pwd "您的密码" --term auto --mode all
-```
-
-*若想手动安装依赖，也可通过以下步骤：*
-```bash
-pip install -r playwright/requirements.txt
-python -m playwright install chromium
-```
+### 2.3 学期自动识别 (Auto Term Detection)
+* 查询学期传入 `auto` 时，爬虫将自动访问课表页面，解析页面顶部的 `<select id="xnxq01id">` 元素，提取出标有 `selected` 属性的选项作为**教务系统当前正活跃的学期**，实现零输入智能同步。
+* 同时，通过解析主页顶部的当前周次与教学起止周，自动推算出该学期的**开学日期（第一周周一）**，便于日历课表精确定位。
 
 ---
 
-## 4. Selenium 版本详解 (根目录)
+## 3. 安装依赖
 
-Selenium 版本位于项目根目录下，是传统的浏览器自动化解决方案。
-
-### 4.1 环境要求
-- **Python 版本**：Python 3.10+
-- **系统环境**：Windows / macOS / Linux
-- **硬性前提**：**必须**在系统上安装 Google Chrome 浏览器。
-
-### 4.2 依赖介绍
-主要依赖列在根目录 [`requirements.txt`](file:///c:/Users/tanner/Desktop/selenium/requirements.txt) 中：
-- `requests>=2.31`
-- `beautifulsoup4>=4.12` & `lxml>=5.0`
-- `selenium>=4.15` (Chrome 浏览器登录兜底)
-- `webdriver-manager>=4.0` (自动下载匹配当前 Chrome 版本的 ChromeDriver)
-- `pycryptodome>=3.19.0`
-
-### 4.3 快速开始
-1. 安装 Python 依赖包：
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. 运行脚本：
-   ```bash
-   python hut_schedule.py --user "您的学号" --pwd "您的密码" --term auto --mode all
-   ```
-
----
-
-## 5. 命令行使用说明
-
-两版本爬虫接受相同的 CLI 参数，支持完全一致的功能：
+确保本机已安装 **Python 3.10+**。
 
 ```bash
-# 1. 抓取整学期所有课表、考试、成绩，并保存为 JSON 文件
-python playwright/hut_schedule.py --user "123456" --pwd "mypwd" --term "2025-2026-2" --mode all --out "result.json"
+# 安装 Python 依赖包
+pip install -r requirements.txt
 
-# 2. 仅抓取课程成绩 (单模块运行)
-python playwright/hut_schedule.py --user "123456" --pwd "mypwd" --term "2025-2026-2" --mode grade
-
-# 3. 强制重新登录（跳过本地 Cookie 缓存，重新调起浏览器或 Requests）
-python playwright/hut_schedule.py --user "123456" --pwd "mypwd" --relogin
+# 安装 Playwright 所需的浏览器内核 (Chromium)
+playwright install chromium
 ```
 
-### CLI 参数列表
+> **主要依赖**：`requests` (网络请求)、`beautifulsoup4` (HTML解析)、`pycryptodome` (密码RSA加密)、`playwright` (浏览器兜底登录)。
 
+---
+
+## 4. 命令行使用说明
+
+可以通过以下参数控制爬虫的行为：
+
+```bash
+# 同时抓取当前学期所有数据（课表、考试、成绩、学期信息），输出到 console
+python hut_schedule.py --user "您的学号" --pwd "您的密码" --term auto --mode all
+
+# 仅抓取课程成绩，指定学期，并输出到 result.json 文件中
+python hut_schedule.py --user "您的学号" --pwd "您的密码" --term "2025-2026-1" --mode grade --out result.json
+
+# 强制重新登录（忽略本地 Cookie 缓存）
+python hut_schedule.py --user "您的学号" --pwd "您的密码" --relogin --mode schedule
+```
+
+### 命令行参数表
 | 参数 | 默认值 | 可选值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `--user` | 空 | - | 学号/账号 |
-| `--pwd` | 空 | - | 统一身份认证密码 |
-| `--term` | 自动推算 | `auto` / `2025-2026-1` ... | 目标学期，`auto` 代表教务当前活跃学期 |
-| `--week` | 空 | - | 目标周次，格式如 `"第13周"`。留空代表整学期 |
-| `--kbjcmsid` | 空 | - | 节次时间模式 ID（特殊学期调整大节时间时使用） |
-| `--mode` | `all` | `schedule` / `exam` / `grade` / `info` / `all` | 抓取模块分类。`all` 包含全部四个模块 |
-| `--out` | 空 | - | 结果输出的 JSON 路径，留空则仅控制台打印 |
-| `--relogin` | `False` | 命令行直接添加即可 | 是否忽略本地 Cookie 缓存强制执行重新登录 |
-| `--headless` | `False` | 命令行直接添加即可 | 调起浏览器兜底登录时是否使用无头模式 (Headless) |
-
----
-
-## 6. 系统对接与数据流设计
-
-本爬虫项目作为数据同步模块，可无缝嵌入 Electron 主进程（或后端微服务）中。
-
-1. **接口契约**：前端通过 Node.js `child_process.exec` 执行本 CLI 脚本，并指定 `--out` 参数。
-2. **数据处理**：脚本抓取成功后将完整数据以约定格式存入 JSON 临时文件。
-3. **数据结构标准**：输出的 JSON 文件结构（包含课表、备注、考试、成绩等）完全符合 [对接开发指南 (crawler_integration_guide.md)](file:///C:/Users/tanner/Desktop/crawler_integration_guide.md) 中定义的 Schema。
+| `--pwd` | 空 | - | 密码 |
+| `--term` | 自动推算 | `auto` / `2025-2026-2` ... | 目标学期，`auto` 代表教务当前活跃学期 |
+| `--week` | 空 | - | 周次，留空=整学期 |
+| `--kbjcmsid`| 空 | - | 节次时间模式 id，留空走默认 |
+| `--mode` | `all` | `schedule` / `exam` / `grade` / `info` / `all` | 抓取模块分类 |
+| `--out` | 空 | - | 结果输出的 JSON 路径 |
+| `--relogin`| `False` | 命令行加此参数即可 | 是否强制启动登录（不使用缓存） |
+| `--headless`| `False` | 命令行加此参数即可 | 兜底启动 Playwright 时是否采用无头模式 |
